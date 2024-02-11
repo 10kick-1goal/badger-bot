@@ -24,7 +24,6 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
 
     uint256 public nextDistributionDate;
     uint256 public lastUpdateTime;
-    uint256 private rewardPerTokenStored;
     uint256 public totalStakedSupply;
     address[] private users;
     bool private profitDistributed = false;
@@ -35,7 +34,7 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
     mapping(address => uint256[]) private tokensStaked;
     mapping(uint256 => uint256) public tokenIdToIndex;
 
-    constructor(address _nftCollection) ConfirmedOwner(msg.sender) {
+    constructor(address _nftCollection) payable ConfirmedOwner(msg.sender){
         nftCollection = IERC721(_nftCollection);
         setChainlinkToken(0x779877A7B0D9E8603169DdbD7836e478b4624789);
         setChainlinkOracle(0x6090149792dAAeE9D1D568c9f9a6F6B46AA29eFD);
@@ -109,7 +108,7 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
         if (userTokens.length < 1) {
             removeUser(msg.sender);
         }
-        claimRewards();
+        claimRewards(msg.sender);
         emit Unstaked(msg.sender, tokenIds);
     }
 
@@ -117,7 +116,7 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
 	function requestProfitData() public onlyOwner returns (bytes32 requestId) {
         Chainlink.Request memory req = buildChainlinkRequest(jobId, address(this), this.fulfill.selector);
 
-        req.add("get","https://badger-backend-952bd65fee6e.herokuapp.com/profit?period=");
+        req.add("get","https://badger-backend-952bd65fee6e.herokuapp.com/profit?period=7");
 		req.add("path", "netProfit"); 
 
         int256 timesAmount = 10 ** 18;
@@ -139,16 +138,19 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
         );
     }
 
-    function claimRewards() public nonReentrant updateReward(msg.sender) {
-        uint256 reward = rewards[msg.sender];
+    function claimRewards(address _to) public nonReentrant updateReward(msg.sender) {
+        address to = payable(_to);
+        // move to get available rewards
+        uint256 reward = getAvailableRewards(_to);
         if (reward > 0) {
-            (bool sent, bytes memory data) = msg.sender.call{value: reward}("");
+            (bool success,) = to.call{value: reward}("");
+            require(success, "Failed to send Ether");
             emit RewardPaid(msg.sender, reward);
         }
     }
 
-    function withdrawAll() external {
-        claimRewards();
+    function unstakeAll() external {
+        claimRewards(msg.sender);
         unstake(tokensStaked[msg.sender]);
     }
 
@@ -178,7 +180,7 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
     }
 
     function distributeRewards() public onlyOwner {
-        require(lastUpdateTime == 0 || block.timestamp >= lastUpdateTime + 30 days, "Not enough time has passed");
+        require(lastUpdateTime == 0 || block.timestamp >= lastUpdateTime + 7 days, "Not enough time has passed");
         requestProfitData();
         for (uint256 i = 0; i < users.length; i++) {
             uint256 userReward = rewards[users[i]];
@@ -187,9 +189,20 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
             emit RewardAdded(users[i], currentReward);
         }
         lastUpdateTime = lastTimeRewardApplicable();
-        nextDistributionDate = block.timestamp + 30 days;
+        nextDistributionDate = block.timestamp + 7 days;
         emit RewardsDurationUpdated(nextDistributionDate);
 
+    }
+
+    function deposit() public onlyOwner payable {
+
+    }
+
+    function withdraw() public {
+        uint amount = address(this).balance;
+        address owner = payable(msg.sender);
+        (bool success, ) = owner.call{value: amount}("");
+        require(success, "Failed to send Ether");
     }
 
     modifier updateReward(address account) {

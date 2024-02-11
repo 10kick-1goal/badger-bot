@@ -6,7 +6,7 @@ module.exports = async ({ getNamedAccounts, deployments }) => {
     const { deploy, log } = deployments
     const { deployer } = await getNamedAccounts()
     log("----------------------------------------------------")
-    const arguments = ["0x3D98Ff324e4611B0BbF10850F6c8E9BA081aa753"]
+    const arguments = ["0x1C2533D734b0a8f10Be22a0cDdBFF1912a0fAbD4"]
     const BadgerBotStakingContract = await deploy("BadgerBotStakingContract", {
         from: deployer,
         args: arguments,
