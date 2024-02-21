@@ -29,10 +29,23 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
     bool private profitDistributed = false;
     uint public totalSupply = 5;
 
+    struct StakedAsset {
+        uint256 tokenId;
+        uint256 depositAmount;
+        uint256 depositTimestamp;
+        uint256 stakeTimestamp;
+        bool staked;
+        bool deposited;
+    }
+
+    // Deposit min = 1 ETH, deposit max = 5 ETH. 
+
+    uint256 public MIN_DEPOSIT = 1000000000000000000;
+    uint256 public MAX_DEPOSIT = 5000000000000000000;
+
     mapping(address => uint256) private rewards;
-    mapping(uint256 => address) public stakedAssets;
-    mapping(address => uint256[]) private tokensStaked;
-    mapping(uint256 => uint256) public tokenIdToIndex;
+    mapping(address => StakedAsset) public stakedAssets;
+    address[] public whitelist;
 
     constructor(address _nftCollection) payable ConfirmedOwner(msg.sender){
         nftCollection = IERC721(_nftCollection);
@@ -60,58 +73,87 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
         }
     }
 
-
-    function stake(uint256[] memory tokenIds) external {
-        require(tokenIds.length != 0, "Staking: No tokenIds provided");
-
-        uint256 amount = tokenIds.length;
-        for (uint256 i = 0; i < amount; i += 1) {
-            nftCollection.safeTransferFrom(msg.sender, address(this), tokenIds[i]);
-
-            stakedAssets[tokenIds[i]] = msg.sender;
-            tokensStaked[msg.sender].push(tokenIds[i]);
-            tokenIdToIndex[tokenIds[i]] = tokensStaked[msg.sender].length - 1;
-        }
-        totalStakedSupply += amount;
-
-         if (!userExist(msg.sender)) {
-            users.push(msg.sender);
-        }
-        emit Staked(msg.sender, tokenIds);
+    function editDepositRange(uint256 _min, uint256 _max) external {
+        MIN_DEPOSIT = _min;
+        MAX_DEPOSIT = _max;
     }
 
-    function unstake(uint256[] memory tokenIds) public nonReentrant {
-        require(tokenIds.length != 0, "Staking: No tokenIds provided");
+    function addToWhiteList(address[] memory _whitelist) external {
+        for (uint256 i = 0; i < _whitelist.length; i++) {
+            whitelist.push(_whitelist[i]);
+        }
+    }
 
-        uint256 amount = tokenIds.length;
-        uint256[] storage userTokens = tokensStaked[msg.sender];
-
-        for (uint256 i = 0; i < amount; i += 1) {
-            require(stakedAssets[tokenIds[i]] == msg.sender, "Staking: Not the staker of the token");
-
-            nftCollection.safeTransferFrom(address(this), msg.sender, tokenIds[i]);
-
-            stakedAssets[tokenIds[i]] = address(0);
-
-
-            uint256 index = tokenIdToIndex[tokenIds[i]];
-            uint256 lastTokenIdIndex = userTokens.length - 1;
-            if (index != lastTokenIdIndex) {
-                uint256 lastTokenId = userTokens[lastTokenIdIndex];
-                userTokens[index] = lastTokenId;
-                tokenIdToIndex[lastTokenId] = index;
+     function isWhitelisted(address _address) public view returns (bool) {
+        for (uint256 i = 0; i < whitelist.length; i++) {
+            if (whitelist[i] == _address) {
+                return true;
             }
-            userTokens.pop();
         }
-        totalStakedSupply -= amount;
-
-        if (userTokens.length < 1) {
-            removeUser(msg.sender);
-        }
-        claimRewards(msg.sender);
-        emit Unstaked(msg.sender, tokenIds);
+        return false;
     }
 
+    function addExistingInvestors(address _investor, uint256 _tokenId, uint256 _depositAmount, uint256 _depositTimestamp) external {
+        require(isWhitelisted(_investor), "Address is not in the whitelist");
+        require(!stakedAssets[_investor].staked, "Address already has a staked asset");
+
+        stakedAssets[_investor] = StakedAsset({
+            tokenId: _tokenId,
+            depositAmount: _depositAmount,
+            depositTimestamp: _depositTimestamp,
+            stakeTimestamp: _depositTimestamp, 
+            staked: true,
+            deposited: true
+        });
+
+        totalStakedSupply += 1;
+        users.push(_investor);
+    }
+
+    function stake(uint256 tokenId) external {
+        require(nftCollection.balanceOf(msg.sender) > 0, 'user has no NFT pass');
+        require(stakedAssets[msg.sender].staked == false, 'user already has staked asset');
+        nftCollection.safeTransferFrom(msg.sender, address(this), tokenId);
+        totalStakedSupply += 1;
+        
+        stakedAssets[msg.sender].tokenId = tokenId;
+        stakedAssets[msg.sender].stakeTimestamp = block.timestamp;
+        stakedAssets[msg.sender].staked = true;
+        users.push(msg.sender);
+        emit Staked(msg.sender, tokenId);
+    }
+
+    function unstake(uint256 tokenId) public nonReentrant {
+        require(stakedAssets[msg.sender].staked == true, 'user has no staked asset');
+        nftCollection.safeTransferFrom(address(this), msg.sender, tokenId);
+
+        totalStakedSupply -= 1;
+        stakedAssets[msg.sender].tokenId = 0;
+        stakedAssets[msg.sender].stakeTimestamp = 0;
+        removeUser(msg.sender);
+        emit Unstaked(msg.sender, tokenId);
+    }
+
+    function addFunds() public payable {
+        require(stakedAssets[msg.sender].staked == true, 'user has no staked asset');
+        require(MIN_DEPOSIT >= msg.value, 'deposit amount is less than minimum deposit');
+        require(MAX_DEPOSIT <= msg.value, 'deposit amount is more than maximum deposit');
+
+        uint256 prevAmount = stakedAssets[msg.sender].depositAmount;
+        uint256 newAmount = prevAmount +  msg.value;
+
+        stakedAssets[msg.sender].depositAmount = newAmount;
+        stakedAssets[msg.sender].depositTimestamp = block.timestamp;
+        stakedAssets[msg.sender].deposited = true;
+
+        emit Deposit(msg.sender,  msg.value);
+    }
+
+    function withdraw() public onlyOwner nonReentrant {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "Balance is zero");
+        payable(owner()).transfer(balance);
+    }
 
 	function requestProfitData() public onlyOwner returns (bytes32 requestId) {
         Chainlink.Request memory req = buildChainlinkRequest(jobId, address(this), this.fulfill.selector);
@@ -138,84 +180,20 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard, ChainlinkCli
         );
     }
 
-    function claimRewards(address _to) public nonReentrant updateReward(msg.sender) {
-        address to = payable(_to);
-        // move to get available rewards
-        uint256 reward = getAvailableRewards(_to);
-        if (reward > 0) {
-            (bool success,) = to.call{value: reward}("");
-            require(success, "Failed to send Ether");
-            emit RewardPaid(msg.sender, reward);
-        }
-    }
-
-    function unstakeAll() external {
-        claimRewards(msg.sender);
-        unstake(tokensStaked[msg.sender]);
-    }
 
     function userStakeInfo(address _user)
         public
         view
-        returns (uint256[] memory _tokensStaked, uint256 _availableRewards)
+        returns (StakedAsset memory)
     {
-        _tokensStaked = tokensStaked[_user];
-        _availableRewards = getAvailableRewards(_user);
-    }
-
-
-    function lastTimeRewardApplicable() public view returns (uint256 _lastRewardsApplicable) {
-        return block.timestamp;
-    }
-
-
-    function calculateRewards(address _user) public view returns (uint256 _rewards) {
-        uint256 amount = tokensStaked[_user].length;
-        return amount * profit * 3 / (totalSupply * 10);
-    }
-
-
-    function getAvailableRewards(address _user) public view returns (uint256 _rewards) {
-        return rewards[_user];
-    }
-
-    function distributeRewards() public onlyOwner {
-        require(lastUpdateTime == 0 || block.timestamp >= lastUpdateTime + 7 days, "Not enough time has passed");
-        requestProfitData();
-        for (uint256 i = 0; i < users.length; i++) {
-            uint256 userReward = rewards[users[i]];
-            uint256 currentReward = calculateRewards(users[i]);
-            rewards[users[i]] = userReward + currentReward;
-            emit RewardAdded(users[i], currentReward);
-        }
-        lastUpdateTime = lastTimeRewardApplicable();
-        nextDistributionDate = block.timestamp + 7 days;
-        emit RewardsDurationUpdated(nextDistributionDate);
-
-    }
-
-    function deposit() public onlyOwner payable {
-
-    }
-
-    function withdraw() public {
-        uint amount = address(this).balance;
-        address owner = payable(msg.sender);
-        (bool success, ) = owner.call{value: amount}("");
-        require(success, "Failed to send Ether");
-    }
-
-    modifier updateReward(address account) {
-        if (account != address(0)) {
-            rewards[account] = 0 ;
-        }
-        _;
+        return stakedAssets[_user];
     }
 
     event RewardAdded(address indexed user, uint256 reward);
-    event Staked(address indexed user, uint256[] tokenIds);
-    event Unstaked(address indexed user, uint256[] tokenIds);
+    event Staked(address indexed user, uint256 tokenId);
+    event Unstaked(address indexed user, uint256 tokenId);
     event RewardPaid(address indexed user, uint256 reward);
     event RewardsDurationUpdated(uint256 newDuration);
     event RequestProfit(bytes32 indexed requestId, uint256 volume);
+    event Deposit(address indexed user, uint256 amount);
 }
