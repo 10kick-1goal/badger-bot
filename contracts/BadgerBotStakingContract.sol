@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
-import "@openzeppelin/contracts/token/ERC721/utils/ERC721Holder.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./BadgerBotPool.sol";
 
-/// @author Shola Ayeni
+/// @author Shola Ayeni, Hiroki Hara
 /// @title BadgerBot NFT Staking Contract
 /// @notice Staking Contract that uses the Openzepellin Staking model to distribute ERC20 token rewards in a dynamic way,
 /// proportionally based on the amount of ERC721 tokens staked by each staker at any given time.
 
-contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard {
+contract BadgerBotStakingContract is ReentrancyGuard {
 
     BadgerBotPool public nftCollection;
 
@@ -19,14 +17,21 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard {
     address[] private users;
     uint public totalSupply = 5;
 
-    struct StakedAsset {
-        uint256 tokenId;
+    struct DepositRecord {
         uint256 deposit_amount;
         uint256 deposit_timestamp;
+        uint256 deposit_tax;
+        bool deposited;
+    }
+
+    struct StakedAsset {
+        uint256 tokenId;
         uint256 stake_timestamp;
         bool staked;
+        uint256 deposit_amount_all;
+        uint256 deposit_tax_all;
         bool deposited;
-        uint256 deposit_tax;
+        DepositRecord[] deposit_records;
     }
 
     address public owner;
@@ -64,28 +69,34 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard {
         }
     }
 
-    function editDepositRange(uint256 _min, uint256 _max) external {
+    function editDepositRange(uint256 _min, uint256 _max) external onlyOwner {
         MIN_DEPOSIT = _min;
         MAX_DEPOSIT = _max;
     }
 
-    function addExistingInvestors(address _investor, uint256 _depositAmount, uint256 _depositTimestamp) external onlyOwner() {
+    function addExistingInvestors(address _investor, uint256 _depositAmount, uint256 _depositTimestamp) external onlyOwner {
         require(nftCollection.isWhitelisted(_investor), "Address is not in the whitelist");
+        require(_depositAmount > 0, "Deposit amount must be greater than zero");
 
         uint256 _tokenId = nftCollection.tokenOfOwnerByIndex(_investor, 0);
-        stakedAssets[_investor] = StakedAsset({
-            tokenId: _tokenId,
+
+        stakedAssets[_investor].tokenId = _tokenId;
+        stakedAssets[_investor].stake_timestamp = _depositTimestamp;
+        stakedAssets[_investor].staked = false;
+
+        DepositRecord memory newRecord = DepositRecord({
             deposit_amount: _depositAmount,
-            deposit_timestamp: _depositTimestamp,
-            stake_timestamp: _depositTimestamp, 
-            staked: false,
-            deposited: true,
-            deposit_tax: _depositAmount /10
+            deposit_timestamp: block.timestamp,
+            deposit_tax: _depositAmount / 10,
+            deposited: false
         });
+
+        stakedAssets[msg.sender].deposit_records.push(newRecord);
     }
 
     function stake(uint256 tokenId) external {
         require(nftCollection.balanceOf(msg.sender) > 0, 'user has no NFT pass');
+        require(stakedAssets[msg.sender].tokenId == tokenId, 'user is not the owner of this nft');
         require(stakedAssets[msg.sender].staked == false, 'user already has staked asset');
         nftCollection.safeTransferFrom(msg.sender, address(this), tokenId);
         totalStakedSupply += 1;
@@ -99,6 +110,7 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard {
 
     function unstake(uint256 tokenId) public nonReentrant {
         require(stakedAssets[msg.sender].staked == true, 'user has no staked asset');
+        require(stakedAssets[msg.sender].tokenId == tokenId, 'user is not the owner of this asset');
         nftCollection.safeTransferFrom(address(this), msg.sender, tokenId);
 
         totalStakedSupply -= 1;
@@ -110,18 +122,19 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard {
 
     function deposit() public payable {
         require(stakedAssets[msg.sender].staked, 'user has no staked asset');
-        require(msg.value >= MIN_DEPOSIT && msg.value <= MAX_DEPOSIT, "Deposit amount is not within the allowed range");
+        require(msg.value > 0, "Deposit amount must be greater than zero");
 
-        uint256 prevAmount = stakedAssets[msg.sender].deposit_amount;
-        uint256 newAmount = prevAmount +  msg.value;
-        uint256 prevDepositTax = stakedAssets[msg.sender].deposit_tax;
-        uint256 newDepositTax = prevDepositTax + (msg.value / 10);
+        uint256 newTotalDeposit = stakedAssets[msg.sender].deposit_amount_all + msg.value;
+        require(newTotalDeposit >= MIN_DEPOSIT && newTotalDeposit <= MAX_DEPOSIT, "Deposit amount is not within the allowed range");
 
-        stakedAssets[msg.sender].deposit_amount = newAmount;
-        stakedAssets[msg.sender].deposit_timestamp = block.timestamp;
-        stakedAssets[msg.sender].deposited = true;
-        stakedAssets[msg.sender].deposit_tax = newDepositTax;
+        DepositRecord memory newRecord = DepositRecord({
+            deposit_amount: msg.value,
+            deposit_timestamp: block.timestamp,
+            deposit_tax: msg.value / 10,
+            deposited: false
+        });
 
+        stakedAssets[msg.sender].deposit_records.push(newRecord);
         emit Deposit(msg.sender,  msg.value);
     }
 
@@ -139,7 +152,34 @@ contract BadgerBotStakingContract is ERC721Holder, ReentrancyGuard {
         return stakedAssets[_user];
     }
 
+    function depositToPool() external onlyOwner {
+        for (uint256 i = 0; i < users.length; i++) {
+            address user = users[i];
+            StakedAsset storage asset = stakedAssets[user];
+
+            for (uint256 j = 0; j < asset.deposit_records.length; j++) {
+                if (!asset.deposit_records[j].deposited) {
+                    uint256 amount = asset.deposit_records[j].deposit_amount;
+                    uint256 tax = asset.deposit_records[j].deposit_tax;
+
+                    payable(address(nftCollection)).transfer(amount);
+
+                    asset.deposit_amount_all += amount;
+                    asset.deposit_tax_all += tax;
+                    asset.deposit_records[j].deposited = true;
+
+                    if (j == 0) {
+                        asset.deposited = true;
+                    }
+
+                    emit DepositToPool(user, amount, tax);
+                }
+            }
+        }
+    }
+
     event Staked(address indexed user, uint256 tokenId);
     event Unstaked(address indexed user, uint256 tokenId);
     event Deposit(address indexed user, uint256 amount);
+    event DepositToPool(address indexed user, uint256 amount, uint256 tax);
 }
