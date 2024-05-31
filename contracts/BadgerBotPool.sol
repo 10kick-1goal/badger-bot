@@ -2,10 +2,14 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+// import "@openzeppelin/contracts/token/ERC721/IERC721.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Pausable.sol";
 import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Burnable.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+// import "./interfaces/IFloorPriceOracle.sol"; 
 
 contract BadgerBotPool is
     ERC721,
@@ -21,7 +25,11 @@ contract BadgerBotPool is
     uint256 public MAX_SUPPLY = 5;
 
     address public owner;
-    
+
+    // IFloorPriceOracle public floorPriceOracle;
+    IERC20 public weth;
+    IERC20 public beth;
+
     bool public publicMintOpen = false;
 
     mapping(address => bool) public whitelist;
@@ -31,9 +39,17 @@ contract BadgerBotPool is
 
     mapping(address => uint256) public mintedCount;
 
+    uint256 public walletTotalOld;
+
     // ============ 2.  Lifecycle Methods  // ============
-    constructor(address initialOwner) ERC721("Badger Bot Pool", "BADGER") {
+    constructor(address initialOwner, address _floorPriceOracle, address _weth, address _beth) ERC721("Badger Bot Pool", "BADGER") {
         owner = msg.sender;
+
+        // floorPriceOracle = IFloorPriceOracle(_floorPriceOracle);
+        weth = IERC20(_weth);
+        beth = IERC20(_beth);
+
+        walletTotalOld = 0;
 
         whitelist[address(0x297122b6514a9A857830ECcC6C41F1803963e516)] = true;
         whitelist[address(0xC95449734dDa7ac6d494a1077Ca7f1773be4F38D)] = true;
@@ -68,11 +84,19 @@ contract BadgerBotPool is
     }
 
 
-    function setMintFee(uint256 _mintFee) external onlyOwner() {
+    function setMintFee(uint256 _mintFee) external onlyOwner {
         MINT_PRICE = _mintFee;
     }
 
-   function addToWhitelist(address[] memory _addresses) external onlyOwner {
+    function setWalletTotalOld(uint256 _walletTotalOld) external onlyOwner {
+        walletTotalOld = _walletTotalOld;
+    }
+
+    function getWalletTotalOld() external view returns (uint256) {
+        return walletTotalOld;
+    }
+
+    function addToWhitelist(address[] memory _addresses) external onlyOwner {
         for (uint256 i = 0; i < _addresses.length; i++) {
             address addr = _addresses[i];
             whitelist[addr] = true;
@@ -116,7 +140,6 @@ contract BadgerBotPool is
             }
         }
     }
-
 
     function editMintWindows(bool _publicMintOpen) external onlyOwner {
         publicMintOpen = _publicMintOpen;
@@ -165,9 +188,40 @@ contract BadgerBotPool is
         MAX_SUPPLY = _supply;
     }
 
+    // ============ 6.  Calculate Wallet Total Current Functions  // ===========
+    function calculateWalletTotalCurrent() public view returns (uint256) {
+        uint256 assetsValue = calculateAssetsValue();
+        uint256 ethBalance = address(this).balance;
+        uint256 wethBalance = weth.balanceOf(address(this));
+        uint256 bethBalance = beth.balanceOf(address(this));
+
+        uint256 totalValue = assetsValue + ethBalance + wethBalance + bethBalance;
+        return totalValue;
+    }
+
+    function calculateAssetsValue() internal view returns (uint256) {
+        uint256 totalAssetsValue = 0;
+        uint256 nftCount = balanceOf(address(this));
+        for (uint256 i = 0; i < nftCount; i++) {
+            uint256 tokenId = tokenOfOwnerByIndex(address(this), i);
+            // uint256 floorPrice = floorPriceOracle.getFloorPrice(address(this), tokenId);
+            uint256 floorPrice = 0.1 ether; //test limit floor price
+            totalAssetsValue += floorPrice;
+        }
+        return totalAssetsValue;
+    }
+
+    function getWethBalance() public view returns (uint256) {
+        return weth.balanceOf(address(this));
+    }
+
+    function getBethBalance() public view returns (uint256) {
+        return beth.balanceOf(address(this));
+    }
+
 
     // The following functions are overrides required by Solidity.
-    // ============ 6.  Other Functions  // ============
+    // ============ 7.  Other Functions  // ============
     function _update(
         address to,
         uint256 tokenId,
@@ -179,13 +233,21 @@ contract BadgerBotPool is
     function _increaseBalance(
         address account,
         uint128 value
-    ) internal override(ERC721, ERC721Enumerable) {
+    ) internal override (ERC721, ERC721Enumerable) {
         super._increaseBalance(account, value);
     }
 
     function supportsInterface(
         bytes4 interfaceId
-    ) public view override(ERC721, ERC721Enumerable) returns (bool) {
+    ) public view override (ERC721, ERC721Enumerable) returns (bool) {
         return super.supportsInterface(interfaceId);
+    }
+
+    function balanceOf(address assetOwner) public view override (ERC721, IERC721) returns (uint256) {
+        return ERC721.balanceOf(assetOwner);
+    }
+
+    function tokenOfOwnerByIndex(address assetOwner, uint256 index) public view override returns (uint256) {
+        return ERC721Enumerable.tokenOfOwnerByIndex(assetOwner, index);
     }
 }
