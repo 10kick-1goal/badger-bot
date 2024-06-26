@@ -2,7 +2,11 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 import "./BadgerBotPool.sol";
+import "./DateTime.sol";
 
 /// @author Shola Ayeni, Hiroki Hara
 /// @title BadgerBot NFT Staking Contract
@@ -10,70 +14,75 @@ import "./BadgerBotPool.sol";
 /// proportionally based on the amount of ERC721 tokens staked by each staker at any given time.
 
 contract BadgerBotStakingContract is ReentrancyGuard {
+    using Strings for uint256;
 
     BadgerBotPool public nftCollection;
+    IERC20 public weth;
+    // IERC20 public beth;
+
+    address public owner;
 
     uint256 public totalStakedSupply;
     address[] private users;
-    uint public totalSupply = 5;
+    // uint public totalSupply = 5;
+
+
+    uint256 public MIN_DEPOSIT = 1 ether;
+    uint256 public MAX_DEPOSIT = 5 ether;
+    uint256 public MAX_WITHDRAW_PERCENT = 50;
+
+
+    uint256 public fundsTotalOld;
+    uint256 public allocationTotalOld;
+    uint256 public ratioOld;
+    
+    uint256 public allocationTotal;
+    uint256 private depositAmountThisMonth;
+    // uint256 public lastDistributionTimestamp;
 
     struct DepositRecord {
         uint256 deposit_amount;
         uint256 deposit_timestamp;
-        uint256 deposit_tax;
-        bool deposited;
     }
 
     struct StakedAsset {
         uint256 tokenId;
         uint256 stake_timestamp;
         bool staked;
-        uint256 deposit_amount_all;
-        uint256 deposit_tax_all;
+        uint256 deposit_timestamp;
+        uint256 allocation;
         bool deposited;
+        bool enableWithdrawProfit;
+        uint256 deposit_amount_this_month;
         DepositRecord[] deposit_records;
     }
 
-    address public owner;
-    uint256 public MIN_DEPOSIT = 1 ether;
-    uint256 public MAX_DEPOSIT = 5 ether;
-
-    mapping(address => uint256) private rewards;
     mapping(address => StakedAsset) public stakedAssets;
 
-    constructor(address _nftCollection) {
+    address[] public withdrawProfitRequestUsers;
+    mapping(address => bool) public isWithdrawProfit;
+    // mapping(address => uint256) private rewards;
+
+    address[] private withdrawRequestUsers;
+    mapping (address => uint256) public withdrawFundsPercents;
+
+    constructor(address payable _nftCollection, address _weth) {
         owner = msg.sender;
         nftCollection = BadgerBotPool(_nftCollection);
+        weth = IERC20(_weth);
     }
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Not the owner");
-        _;
-    }
-
-    function userExist(address _address) internal view returns (bool) {
-        for (uint256 i = 0; i < users.length; i++) {
-            if (users[i] == _address) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    function removeUser(address _user) internal {
-        for (uint256 i = 0; i < users.length; i++) {
-            if (users[i] == _user) {
-                users[i] = users[users.length - 1];
-                users.pop();
-            }
-        }
-    }
-
-    function editDepositRange(uint256 _min, uint256 _max) external onlyOwner {
+    //-------------------- Set CONSTANTS -----------------------//
+    function setDepositRange(uint256 _min, uint256 _max) external onlyOwner {
         MIN_DEPOSIT = _min;
         MAX_DEPOSIT = _max;
     }
 
+    function setMaxWithdrawPercent (uint256 _percent) external onlyOwner {
+        MAX_WITHDRAW_PERCENT = _percent;
+    }
+
+    //-------------------- NFT Staking and Unstaking -----------------------//
     function addExistingInvestors(address _investor, uint256 _depositAmount, uint256 _depositTimestamp) external onlyOwner {
         require(nftCollection.isWhitelisted(_investor), "Address is not in the whitelist");
         require(_depositAmount > 0, "Deposit amount must be greater than zero");
@@ -86,9 +95,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
 
         DepositRecord memory newRecord = DepositRecord({
             deposit_amount: _depositAmount,
-            deposit_timestamp: block.timestamp,
-            deposit_tax: _depositAmount / 10,
-            deposited: false
+            deposit_timestamp: block.timestamp
         });
 
         stakedAssets[msg.sender].deposit_records.push(newRecord);
@@ -116,32 +123,172 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         totalStakedSupply -= 1;
         stakedAssets[msg.sender].tokenId = 0;
         stakedAssets[msg.sender].stake_timestamp = 0;
-        removeUser(msg.sender);
+        _removeUser(msg.sender);
         emit Unstaked(msg.sender, tokenId);
     }
 
-    function deposit() public payable {
-        require(stakedAssets[msg.sender].staked, 'user has no staked asset');
+    //-------------------- Deposit  -----------------------//    
+    function deposit(uint256 _assetsValue) public payable {
+        StakedAsset storage asset = stakedAssets[msg.sender];
+        require(asset.staked, 'user has no staked asset');
         require(msg.value > 0, "Deposit amount must be greater than zero");
 
-        uint256 newTotalDeposit = stakedAssets[msg.sender].deposit_amount_all + msg.value;
+        uint256 fundsTotal = getTotalFunds(_assetsValue);
+        uint256 fundsUser = fundsTotal * asset.allocation;
+        uint256 newTotalDeposit = fundsUser + msg.value;
         require(newTotalDeposit >= MIN_DEPOSIT && newTotalDeposit <= MAX_DEPOSIT, "Deposit amount is not within the allowed range");
 
+        ( bool sent, ) = address(nftCollection).call{value: msg.value}("");
+        require(sent, "Failed to send Ether");
+        
+        uint256 ratio = fundsTotal / allocationTotal;
         DepositRecord memory newRecord = DepositRecord({
             deposit_amount: msg.value,
-            deposit_timestamp: block.timestamp,
-            deposit_tax: msg.value / 10,
-            deposited: false
+            deposit_timestamp: block.timestamp
         });
 
         stakedAssets[msg.sender].deposit_records.push(newRecord);
+
+        if (asset.allocation == 0) {
+            asset.deposit_timestamp = block.timestamp;
+            asset.deposited = true;
+            asset.enableWithdrawProfit = false;
+            isWithdrawProfit[msg.sender] = false;
+        }
+
+        uint256 depositAllocation = msg.value / ratio;
+        asset.allocation += depositAllocation;
+        allocationTotal += depositAllocation;
+        asset.deposit_amount_this_month += msg.value;
+        depositAmountThisMonth += msg.value;
+
         emit Deposit(msg.sender,  msg.value);
     }
 
-    function withdraw() public onlyOwner nonReentrant {
-        uint256 balance = address(this).balance;
-        require(balance > 0, "Balance is zero");
-        payable(owner).transfer(balance);
+    //-------------------- Reward Distribution -----------------------//
+    function rewardDistribution(uint256 _assetsValue) external onlyOwner nonReentrant {
+        require(_isFirstDayOfMonth(), "Today is not the 1st of the month");
+        // require(block.timestamp > lastDistributionTimestamp + 30 days, "Already distributed this month");
+
+        uint256 fundsTotal = getTotalFunds(_assetsValue);
+        
+        // lastDistributionTimestamp = block.timestamp;
+        emit RewardsDistributed(block.timestamp);
+    }
+
+    //-------------------- Withdraw Request -----------------------//
+    function requestWithdraw(uint256 _withdrawFundsPercent, uint256 _assetsValue) external {
+        uint256 fundsUser = getUserFunds(msg.sender, _assetsValue);
+        if (fundsUser > 1 && _withdrawFundsPercent > MAX_WITHDRAW_PERCENT) {
+            revert(string.concat("You can only request a withdrawal of less than ", MAX_WITHDRAW_PERCENT.toString(),"%."));
+        }
+
+        if (fundsUser <= 1 && _withdrawFundsPercent != 100) {
+            revert("You can only request a withdrawal of 100%.");
+        }
+
+        bool existed = false;
+        for (uint256 i = 0; i < withdrawRequestUsers.length; i++) {
+            if(withdrawRequestUsers[i] != msg.sender) {
+                withdrawFundsPercents[msg.sender] = _withdrawFundsPercent;
+                existed = true;
+                break;
+            }
+        }
+
+        if (existed) {
+            return;
+        }
+
+        withdrawRequestUsers.push(msg.sender);
+        withdrawFundsPercents[msg.sender] = _withdrawFundsPercent;
+    } 
+
+    // function removeFromWithdrawFundsList(uint256 _cancelWithdrawPercent) external {
+    //     require(_withdrawRequestUserExist(msg.sender), "There isn't any withdraw request of you");
+    //     require(_cancelWithdrawPercent > 0, "The withdraw amount you wish to cancel can not be 0");
+    //     withdrawFundsPercents[msg.sender] = _cancelWithdrawPercent;
+    // }
+
+    function cancelWithdrawRequest() external {
+        require(_withdrawRequestUserExist(msg.sender), "There isn't any withdraw request of you");
+        for (uint256 i = 0; i < withdrawRequestUsers.length; i++) {
+            if (withdrawRequestUsers[i] == msg.sender) {
+                withdrawRequestUsers[i] = withdrawRequestUsers[withdrawRequestUsers.length - 1];
+                withdrawRequestUsers.pop();
+            }
+        }
+        withdrawFundsPercents[msg.sender] = 0;
+    }
+
+    function getUserWithdrawRequestInfo(address _user) public view returns (uint256) {
+        require(_withdrawRequestUserExist(_user), "There isn't any withdraw request of you");
+        return withdrawFundsPercents[_user];
+    }
+
+    function _withdrawRequestUserExist(address _address) internal view returns (bool) {
+        for (uint256 i = 0; i < users.length; i++) {
+            if (withdrawRequestUsers[i] == _address) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    //-------------------- Withdraw Profit Request -----------------------//
+    function requestWithdrawProfit() external {
+        require(isWithdrawProfit[msg.sender] == false, "You've already request withdraw profit.");
+        withdrawProfitRequestUsers.push(msg.sender);
+        isWithdrawProfit[msg.sender] = true;
+    }
+
+    function cancelWithdrawProfitRequest() external {
+        require(_withdrawProfitRequestUserExist(msg.sender), "You didn't request withdraw profit.");
+        for (uint256 i = 0; i < withdrawProfitRequestUsers.length; i++) {
+            if (withdrawProfitRequestUsers[i] == msg.sender) {
+                withdrawProfitRequestUsers[i] = withdrawProfitRequestUsers[withdrawProfitRequestUsers.length - 1];
+                withdrawProfitRequestUsers.pop();
+            }
+        }
+        isWithdrawProfit[msg.sender] = false;
+    }
+    
+    function getUserWithdrawProfitRequestInfo(address _user) public view returns (bool) {
+        return isWithdrawProfit[_user];
+    }
+    
+    function _withdrawProfitRequestUserExist(address _address) internal view returns (bool) {
+        for (uint256 i = 0; i < users.length; i++) {
+            if (withdrawProfitRequestUsers[i] == _address) {
+                return true;
+            }
+        }
+        return false;
+    }
+    //-------------------- Base Functions -----------------------//
+    // function withdrawForOwner() public onlyOwner nonReentrant {
+    //     uint256 balance = address(this).balance;
+    //     require(balance > 0, "Balance is zero");
+    //     payable(owner).transfer(balance);
+    // }
+  
+    function getUsers() external view returns (address[] memory) {
+        return users;
+    }
+
+    function getUserStakeInfo(address _user) public view returns (StakedAsset memory) {
+        return stakedAssets[_user];
+    }
+
+    function getTotalFunds(uint256 _assetsValue) public view returns (uint256) {
+        uint256 ethBalance = address(nftCollection).balance;
+        uint256 wethBalance = getWethBalance();
+        uint256 fundsTotal = ethBalance + wethBalance + _assetsValue;
+        return fundsTotal;
+    }
+
+    function getWethBalance() public view returns (uint256) {
+        return weth.balanceOf(address(nftCollection));
     }
 
     function userStakeInfo(address _user)
@@ -152,34 +299,45 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         return stakedAssets[_user];
     }
 
-    function depositToPool() external onlyOwner {
+    function getUserFunds(address _user, uint256 _assetsValue) public view returns (uint256) {
+        uint256 fundsTotal = getTotalFunds(_assetsValue);
+        uint256 allocationUser = stakedAssets[_user].allocation;
+        uint256 fundsUser = fundsTotal * allocationUser / allocationTotal;
+
+        return fundsUser;
+    }
+
+    function userExist(address _address) public view returns (bool) {
         for (uint256 i = 0; i < users.length; i++) {
-            address user = users[i];
-            StakedAsset storage asset = stakedAssets[user];
-
-            for (uint256 j = 0; j < asset.deposit_records.length; j++) {
-                if (!asset.deposit_records[j].deposited) {
-                    uint256 amount = asset.deposit_records[j].deposit_amount;
-                    uint256 tax = asset.deposit_records[j].deposit_tax;
-
-                    payable(address(nftCollection)).transfer(amount);
-
-                    asset.deposit_amount_all += amount;
-                    asset.deposit_tax_all += tax;
-                    asset.deposit_records[j].deposited = true;
-
-                    if (j == 0) {
-                        asset.deposited = true;
-                    }
-
-                    emit DepositToPool(user, amount, tax);
-                }
+            if (users[i] == _address) {
+                return true;
             }
         }
+        return false;
+    }
+
+    function _removeUser(address _user) internal {
+        for (uint256 i = 0; i < users.length; i++) {
+            if (users[i] == _user) {
+                users[i] = users[users.length - 1];
+                users.pop();
+            }
+        }
+    }
+
+    function _isFirstDayOfMonth() internal view returns (bool) {
+        uint256 currentTime = block.timestamp;
+       (uint256 year, uint256 month, uint256 day) = DateTime.timestampToDate(currentTime);
+        return day == 1;
+    }
+
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not the owner");
+        _;
     }
 
     event Staked(address indexed user, uint256 tokenId);
     event Unstaked(address indexed user, uint256 tokenId);
     event Deposit(address indexed user, uint256 amount);
-    event DepositToPool(address indexed user, uint256 amount, uint256 tax);
+    event RewardsDistributed(uint256 timestamp);
 }
