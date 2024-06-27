@@ -21,6 +21,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     // IERC20 public beth;
 
     address public owner;
+    address payable public teamAddress;
 
     uint256 public totalStakedSupply;
     address[] private users;
@@ -30,6 +31,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     uint256 public MIN_DEPOSIT = 1 ether;
     uint256 public MAX_DEPOSIT = 5 ether;
     uint256 public MAX_WITHDRAW_PERCENT = 50;
+    uint256 public TEAM_SHARE = 20;
 
 
     uint256 public fundsTotalOld;
@@ -68,6 +70,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
 
     constructor(address payable _nftCollection, address _weth) {
         owner = msg.sender;
+        teamAddress = payable(0x6360A1E7dFe205397d7EF463cb28f16Fbdaa2D24);//Team Wallet Address
         nftCollection = BadgerBotPool(_nftCollection);
         weth = IERC20(_weth);
     }
@@ -170,8 +173,61 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         require(_isFirstDayOfMonth(), "Today is not the 1st of the month");
         // require(block.timestamp > lastDistributionTimestamp + 30 days, "Already distributed this month");
 
-        uint256 fundsTotal = getTotalFunds(_assetsValue);
+        uint256 fundsTotalCurrent = getTotalFunds(_assetsValue);
+        uint256 profitTotal = fundsTotalCurrent - fundsTotalOld - depositAmountThisMonth;
+
+        if (profitTotal > 0) {
+            uint256 profitTeam = profitTotal * TEAM_SHARE / 100;
+            
+            teamAddress.transfer(profitTeam);
+            emit WithdrawTeamProfit(profitTeam, block.timestamp);
+
+            fundsTotalCurrent = fundsTotalCurrent + profitTeam;
+        }
+
+        uint256 ratio = fundsTotalCurrent / allocationTotal;
+
+        //--------------  Withdraw Profit  ------------//
+        uint256 allocationWithdrawProfit = 0;
+        // uint256 amountWithdrawProfit = 0;
+
+        for (uint256 i = 0; i < withdrawProfitRequestUsers.length; i++) {
+            address user = withdrawProfitRequestUsers[i];
+            StakedAsset storage asset = stakedAssets[user];
+
+            uint256 allocationUser = asset.allocation;
+            uint256 fundsUserCurrent = allocationUser * ratio;
+            uint256 fundsUserOld = allocationUser * ratioOld;
+            uint256 profitUser = fundsUserCurrent - fundsUserOld - asset.deposit_amount_this_month;
+
+            if (profitUser > 0) {
+                payable(user).transfer(profitUser);
+                emit WithdrawUserProfit(user, profitUser, block.timestamp);
+                
+                uint256 allocationUserNew = allocationUser - (profitUser / ratio);
+                allocationWithdrawProfit += (profitUser / ratio);
+                // amountWithdrawProfit += profitUser;
+                asset.allocation = allocationUserNew;
+            }
+
+            isWithdrawProfit[user] = false;
+        }
+
+        allocationTotal = allocationTotal - allocationWithdrawProfit;
+        // fundsTotalCurrent = fundsTotalCurrent - amountWithdrawProfit;
+        fundsTotalCurrent = allocationTotal * ratio;
+
+        delete withdrawProfitRequestUsers;
         
+    //-------------------- Withdraw Request -----------------------//
+
+
+    //-------------------- Reset Old States and Temps States -----------------------//
+        fundsTotalOld = fundsTotalCurrent;
+        allocationTotalOld = allocationTotal;
+        ratioOld = ratio;
+
+
         // lastDistributionTimestamp = block.timestamp;
         emit RewardsDistributed(block.timestamp);
     }
@@ -340,4 +396,6 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     event Unstaked(address indexed user, uint256 tokenId);
     event Deposit(address indexed user, uint256 amount);
     event RewardsDistributed(uint256 timestamp);
+    event WithdrawTeamProfit(uint256 profitTeam, uint256 timestamp);
+    event WithdrawUserProfit(address indexed user, uint256 profit, uint256 timestamp);
 }
