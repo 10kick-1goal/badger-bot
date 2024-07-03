@@ -32,6 +32,9 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     uint256 public MAX_DEPOSIT = 5 ether;
     uint256 public MAX_WITHDRAW_PERCENT = 50;
     uint256 public TEAM_SHARE = 20;
+    uint256 public INITIAL_TAX = 15;
+    uint256 public SLOP_TAX = 1;
+    uint256 public STAGNANT_TAX = 3;
 
 
     uint256 public fundsTotalOld;
@@ -75,17 +78,49 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         weth = IERC20(_weth);
     }
 
-    //-------------------- Set CONSTANTS -----------------------//
+
+    ////////////////////////////////////////////////////////////
+    //--------------------- Set Constants --------------------//
+    ////////////////////////////////////////////////////////////
+
+
     function setDepositRange(uint256 _min, uint256 _max) external onlyOwner {
         MIN_DEPOSIT = _min;
         MAX_DEPOSIT = _max;
     }
 
-    function setMaxWithdrawPercent (uint256 _percent) external onlyOwner {
-        MAX_WITHDRAW_PERCENT = _percent;
+    function setMaxWithdrawPercent(uint256 _maxWithdraw) external onlyOwner {
+        MAX_WITHDRAW_PERCENT = _maxWithdraw;
     }
 
-    //-------------------- NFT Staking and Unstaking -----------------------//
+    function setTeamSharePercent(uint256 _teamShare) external onlyOwner {
+        TEAM_SHARE = _teamShare;
+    }
+
+    function setInitialTaxPercent(uint256 _initialTax) public onlyOwner {
+        INITIAL_TAX = _initialTax;
+    }
+
+    function setSlopTaxPercent(uint256 _slopTax) public onlyOwner {
+        SLOP_TAX = _slopTax;
+    }
+
+    function  setStagnantTaxPercent(uint256 _stagnantTax) public onlyOwner {
+        STAGNANT_TAX = _stagnantTax;
+    }
+
+    function setWithdrawTaxParams(uint256 _initialTax, uint256 _slopTax, uint256 _stagnantTax) external onlyOwner {
+        INITIAL_TAX = _initialTax;
+        SLOP_TAX = _slopTax;
+        STAGNANT_TAX = _stagnantTax;
+    }
+
+
+    ////////////////////////////////////////////////////////////
+    //--------------- NFT Staking and Unstaking --------------//
+    ////////////////////////////////////////////////////////////
+
+
     function addExistingInvestors(address _investor, uint256 _depositAmount, uint256 _depositTimestamp) external onlyOwner {
         require(nftCollection.isWhitelisted(_investor), "Address is not in the whitelist");
         require(_depositAmount > 0, "Deposit amount must be greater than zero");
@@ -130,7 +165,12 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         emit Unstaked(msg.sender, tokenId);
     }
 
-    //-------------------- Deposit  -----------------------//    
+
+    ////////////////////////////////////////////////////////////
+    //------------------------ Deposit -----------------------//
+    ////////////////////////////////////////////////////////////  
+
+
     function deposit(uint256 _assetsValue) public payable {
         StakedAsset storage asset = stakedAssets[msg.sender];
         require(asset.staked, 'user has no staked asset');
@@ -168,7 +208,12 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         emit Deposit(msg.sender,  msg.value);
     }
 
-    //-------------------- Reward Distribution -----------------------//
+
+    ////////////////////////////////////////////////////////////
+    //------------------- Reward Distribution ----------------//
+    ////////////////////////////////////////////////////////////
+
+
     function rewardDistribution(uint256 _assetsValue) external onlyOwner nonReentrant {
         require(_isFirstDayOfMonth(), "Today is not the 1st of the month");
         // require(block.timestamp > lastDistributionTimestamp + 30 days, "Already distributed this month");
@@ -222,7 +267,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     //-------------------- Withdraw Request -----------------------//
 
 
-    //-------------------- Reset Old States and Temps States -----------------------//
+    //------------ Reset Old State and Temps States ----------------//
         fundsTotalOld = fundsTotalCurrent;
         allocationTotalOld = allocationTotal;
         ratioOld = ratio;
@@ -232,7 +277,11 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         emit RewardsDistributed(block.timestamp);
     }
 
-    //-------------------- Withdraw Request -----------------------//
+    ////////////////////////////////////////////////////////////
+    //------------------- Withdraw Request -------------------//
+    ////////////////////////////////////////////////////////////
+
+    
     function requestWithdraw(uint256 _withdrawFundsPercent, uint256 _assetsValue) external {
         uint256 fundsUser = getUserFunds(msg.sender, _assetsValue);
         if (fundsUser > 1 && _withdrawFundsPercent > MAX_WITHDRAW_PERCENT) {
@@ -291,7 +340,12 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         return false;
     }
 
-    //-------------------- Withdraw Profit Request -----------------------//
+ 
+    ////////////////////////////////////////////////////////////
+    //--------------- Withdraw Profit Request ----------------//
+    ////////////////////////////////////////////////////////////
+
+
     function requestWithdrawProfit() external {
         require(isWithdrawProfit[msg.sender] == false, "You've already request withdraw profit.");
         withdrawProfitRequestUsers.push(msg.sender);
@@ -321,7 +375,13 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         }
         return false;
     }
-    //-------------------- Base Functions -----------------------//
+
+
+    ////////////////////////////////////////////////////////////
+    //-------------------- Basic Functions -------------------//
+    ////////////////////////////////////////////////////////////
+
+
     // function withdrawForOwner() public onlyOwner nonReentrant {
     //     uint256 balance = address(this).balance;
     //     require(balance > 0, "Balance is zero");
@@ -383,7 +443,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
 
     function _isFirstDayOfMonth() internal view returns (bool) {
         uint256 currentTime = block.timestamp;
-       (uint256 year, uint256 month, uint256 day) = DateTime.timestampToDate(currentTime);
+       (, , uint256 day) = DateTime.timestampToDate(currentTime);
         return day == 1;
     }
 
@@ -391,6 +451,11 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         require(msg.sender == owner, "Not the owner");
         _;
     }
+
+
+    ////////////////////////////////////////////////////////////
+    //-----------------------  Event  ------------------------//
+    ////////////////////////////////////////////////////////////
 
     event Staked(address indexed user, uint256 tokenId);
     event Unstaked(address indexed user, uint256 tokenId);
