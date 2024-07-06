@@ -43,6 +43,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     
     uint256 public allocationTotal;
     uint256 private depositAmountThisMonth;
+    uint256 private withdrawAmountThisMonth;
     // uint256 public lastDistributionTimestamp;
 
     struct DepositRecord {
@@ -59,6 +60,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         bool deposited;
         bool enableWithdrawProfit;
         uint256 deposit_amount_this_month;
+        uint256 withdraw_amount_this_month;
         DepositRecord[] deposit_records;
     }
 
@@ -66,10 +68,12 @@ contract BadgerBotStakingContract is ReentrancyGuard {
 
     address[] public withdrawProfitRequestUsers;
     mapping(address => bool) public isWithdrawProfit;
-    // mapping(address => uint256) private rewards;
 
-    address[] private withdrawRequestUsers;
-    mapping (address => uint256) public withdrawFundsPercents;
+    address[] private pendingWithdrawUsers;
+    address[] private pendingWithdrawAllUsers;
+    mapping(address => uint256) public pendingWithdrawAmount;
+    uint256 public pendingWithdrawAmountTotal;
+    uint256 public pendingWithdrawAllAllocationTotal;
 
     constructor(address payable _nftCollection, address _weth) {
         owner = msg.sender;
@@ -171,18 +175,20 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     ////////////////////////////////////////////////////////////  
 
 
-    function deposit(uint256 _assetsValue) public payable {
+    function deposit() public payable {
         StakedAsset storage asset = stakedAssets[msg.sender];
         require(asset.staked, 'user has no staked asset');
         require(msg.value > 0, "Deposit amount must be greater than zero");
 
-        uint256 fundsTotal = getTotalFunds(_assetsValue);
+        uint256 fundsTotal = getTotalFunds();
         uint256 fundsUser = fundsTotal * asset.allocation;
         uint256 newTotalDeposit = fundsUser + msg.value;
         require(newTotalDeposit >= MIN_DEPOSIT && newTotalDeposit <= MAX_DEPOSIT, "Deposit amount is not within the allowed range");
 
         ( bool sent, ) = address(nftCollection).call{value: msg.value}("");
         require(sent, "Failed to send Ether");
+
+        emit DepositReceived(msg.sender,  msg.value);
         
         uint256 ratio = fundsTotal / allocationTotal;
         DepositRecord memory newRecord = DepositRecord({
@@ -190,7 +196,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
             deposit_timestamp: block.timestamp
         });
 
-        stakedAssets[msg.sender].deposit_records.push(newRecord);
+        asset.deposit_records.push(newRecord);
 
         if (asset.allocation == 0) {
             asset.deposit_timestamp = block.timestamp;
@@ -209,17 +215,145 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     }
 
 
+
+    ////////////////////////////////////////////////////////////
+    //----------------------- Withdraw  ----------------------//
+    ////////////////////////////////////////////////////////////
+
+
+    function requestWithdraw(uint256 _withdrawFundsPercent) public nonReentrant {
+        require(_withdrawFundsPercent > 0, "Withdraw percent must be greater than zero");
+        require(stakedAssets[msg.sender].allocation > 0, "User has no staked asset");
+
+        uint256 fundsUser = getUserFunds(msg.sender);
+        if (fundsUser < 1 || _withdrawFundsPercent > MAX_WITHDRAW_PERCENT) {
+            revert(string.concat("You can only request a withdrawal of less than ", MAX_WITHDRAW_PERCENT.toString(),"%."));
+        }
+
+
+        uint256 withdrawAmount = fundsUser * _withdrawFundsPercent;
+        uint256 poolEthBalance = address(nftCollection).balance;
+
+        if (poolEthBalance >= withdrawAmount) {
+            _withdrawToUser(msg.sender, withdrawAmount);
+        } else {
+            pendingWithdrawAmount[msg.sender] += withdrawAmount;
+            pendingWithdrawAmountTotal += withdrawAmount;
+            pendingWithdrawUsers.push(msg.sender);
+            emit WithdrawPending(msg.sender, withdrawAmount);
+        }
+    }
+
+    function requestWithdrawAll() public nonReentrant {
+        require(stakedAssets[msg.sender].allocation > 0, "User has no staked asset");
+
+        uint256 fundsUser = getUserFunds(msg.sender);
+        require(fundsUser < 1, "You can withdraw your all funds only when your funds is smaller than 1 ETH.");
+        uint256 poolEthBalance = address(nftCollection).balance;
+        if (poolEthBalance >= fundsUser) {
+            _withdrawToUser(msg.sender, fundsUser);
+        } else {
+            pendingWithdrawAllAllocationTotal += stakedAssets[msg.sender].allocation;
+            pendingWithdrawAllUsers.push(msg.sender);
+            emit WithdrawAllPending(msg.sender);
+        }
+    }
+
+    function completePendingWithdraw() public nonReentrant {
+        uint256 pendingAmount = getPendingAmountUser(msg.sender);
+
+        uint256 poolEthBalance = address(nftCollection).balance;
+        require(poolEthBalance >= pendingAmount, "Pool does not have enough ETH to fulfill pending withdrawal");
+
+        _withdrawToUser(msg.sender, pendingAmount);
+        pendingWithdrawAmount[msg.sender] = 0;
+        pendingWithdrawAmountTotal = pendingWithdrawAmountTotal - pendingAmount;
+        _removeFromPendingWithdrawUserList(msg.sender);
+        // emit PendingWithdrawCompleted(msg.sender, pendingAmount, block.timestamp);
+    }
+
+    function completePendingWithdrawAll() public nonReentrant {
+        require(_isPendingWithdrawAllUserExist(msg.sender), "You didn't request withdrawing all your funds.");
+
+        uint256 poolEthBalance = address(nftCollection).balance;
+        uint256 fundsUser = getUserFunds(msg.sender);
+        require(poolEthBalance >= fundsUser, "Pool does not have enough ETH to fulfill pending withdrawal");
+
+        _withdrawToUser(msg.sender, fundsUser);
+        pendingWithdrawAllAllocationTotal = pendingWithdrawAllAllocationTotal - stakedAssets[msg.sender].allocation;
+        _removeFromPendingWithdrawAllUserList(msg.sender);
+    }
+
+    function getPendingAmountUser(address _user) public view returns (uint256) {
+        require(_isPendingWithdrawUserExist(_user), "There isn't any pending withdraw funds of you");
+        return pendingWithdrawAmount[_user];
+    }
+
+    function _isPendingWithdrawUserExist(address _address) internal view returns (bool) {
+        for (uint256 i = 0; i < pendingWithdrawUsers.length; i++) {
+            if (pendingWithdrawUsers[i] == _address) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function _removeFromPendingWithdrawUserList(address _address) internal {
+        require(_isPendingWithdrawUserExist(_address), "There isn't any pending withdraw funds of you");
+        for (uint256 i = 0; i < pendingWithdrawUsers.length; i++) {
+            if (pendingWithdrawUsers[i] == msg.sender) {
+                pendingWithdrawUsers[i] = pendingWithdrawUsers[pendingWithdrawUsers.length - 1];
+                pendingWithdrawUsers.pop();
+            }
+        }
+    }
+
+    function _isPendingWithdrawAllUserExist(address _address) internal view returns (bool) {
+        for (uint256 i = 0; i < pendingWithdrawAllUsers.length; i++) {
+            if (pendingWithdrawAllUsers[i] == _address) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function _removeFromPendingWithdrawAllUserList(address _address) internal {
+        require(_isPendingWithdrawAllUserExist(_address), "You didn't request withdrawing all your funds.");
+        for (uint256 i = 0; i < pendingWithdrawAllUsers.length; i++) {
+            if (pendingWithdrawAllUsers[i] == msg.sender) {
+                pendingWithdrawAllUsers[i] = pendingWithdrawAllUsers[pendingWithdrawAllUsers.length - 1];
+                pendingWithdrawAllUsers.pop();
+            }
+        }
+    }
+
+    function _withdrawToUser(address _user, uint256 _amount) internal {
+        require(address(nftCollection).balance > _amount, "Insufficient ETH balance to withdraw");
+        StakedAsset storage asset = stakedAssets[_user];
+        nftCollection.withdrawByStakingContract(_user, _amount);
+        emit WithdrawUserFunds(_user, _amount, block.timestamp);
+
+        uint256 fundsTotal = getTotalFunds();
+        uint256 ratio = fundsTotal / allocationTotal;
+        uint256 withdrawAllocation = _amount / ratio;
+        asset.allocation = asset.allocation - withdrawAllocation;
+        allocationTotal = allocationTotal - withdrawAllocation;
+        asset.withdraw_amount_this_month += _amount;
+        withdrawAmountThisMonth += _amount;
+    }
+
+
     ////////////////////////////////////////////////////////////
     //------------------- Reward Distribution ----------------//
     ////////////////////////////////////////////////////////////
 
 
-    function rewardDistribution(uint256 _assetsValue) external onlyOwner nonReentrant {
+    function rewardDistribution() external onlyOwner nonReentrant {
         require(_isFirstDayOfMonth(), "Today is not the 1st of the month");
         // require(block.timestamp > lastDistributionTimestamp + 30 days, "Already distributed this month");
 
-        uint256 fundsTotalCurrent = getTotalFunds(_assetsValue);
-        uint256 profitTotal = fundsTotalCurrent - fundsTotalOld - depositAmountThisMonth;
+        uint256 fundsTotalCurrent = getTotalFunds();
+        uint256 profitTotal = fundsTotalCurrent - fundsTotalOld - depositAmountThisMonth + withdrawAmountThisMonth;
 
         if (profitTotal > 0) {
             uint256 profitTeam = profitTotal * TEAM_SHARE / 100;
@@ -246,7 +380,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
             uint256 profitUser = fundsUserCurrent - fundsUserOld - asset.deposit_amount_this_month;
 
             if (profitUser > 0) {
-                payable(user).transfer(profitUser);
+                nftCollection.withdrawByStakingContract(user, profitUser);
                 emit WithdrawUserProfit(user, profitUser, block.timestamp);
                 
                 uint256 allocationUserNew = allocationUser - (profitUser / ratio);
@@ -263,81 +397,16 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         fundsTotalCurrent = allocationTotal * ratio;
 
         delete withdrawProfitRequestUsers;
-        
-    //-------------------- Withdraw Request -----------------------//
-
 
     //------------ Reset Old State and Temps States ----------------//
         fundsTotalOld = fundsTotalCurrent;
         allocationTotalOld = allocationTotal;
         ratioOld = ratio;
-
+        depositAmountThisMonth = 0;
+        withdrawAmountThisMonth = 0;
 
         // lastDistributionTimestamp = block.timestamp;
         emit RewardsDistributed(block.timestamp);
-    }
-
-    ////////////////////////////////////////////////////////////
-    //------------------- Withdraw Request -------------------//
-    ////////////////////////////////////////////////////////////
-
-    
-    function requestWithdraw(uint256 _withdrawFundsPercent, uint256 _assetsValue) external {
-        uint256 fundsUser = getUserFunds(msg.sender, _assetsValue);
-        if (fundsUser > 1 && _withdrawFundsPercent > MAX_WITHDRAW_PERCENT) {
-            revert(string.concat("You can only request a withdrawal of less than ", MAX_WITHDRAW_PERCENT.toString(),"%."));
-        }
-
-        if (fundsUser <= 1 && _withdrawFundsPercent != 100) {
-            revert("You can only request a withdrawal of 100%.");
-        }
-
-        bool existed = false;
-        for (uint256 i = 0; i < withdrawRequestUsers.length; i++) {
-            if(withdrawRequestUsers[i] != msg.sender) {
-                withdrawFundsPercents[msg.sender] = _withdrawFundsPercent;
-                existed = true;
-                break;
-            }
-        }
-
-        if (existed) {
-            return;
-        }
-
-        withdrawRequestUsers.push(msg.sender);
-        withdrawFundsPercents[msg.sender] = _withdrawFundsPercent;
-    } 
-
-    // function removeFromWithdrawFundsList(uint256 _cancelWithdrawPercent) external {
-    //     require(_withdrawRequestUserExist(msg.sender), "There isn't any withdraw request of you");
-    //     require(_cancelWithdrawPercent > 0, "The withdraw amount you wish to cancel can not be 0");
-    //     withdrawFundsPercents[msg.sender] = _cancelWithdrawPercent;
-    // }
-
-    function cancelWithdrawRequest() external {
-        require(_withdrawRequestUserExist(msg.sender), "There isn't any withdraw request of you");
-        for (uint256 i = 0; i < withdrawRequestUsers.length; i++) {
-            if (withdrawRequestUsers[i] == msg.sender) {
-                withdrawRequestUsers[i] = withdrawRequestUsers[withdrawRequestUsers.length - 1];
-                withdrawRequestUsers.pop();
-            }
-        }
-        withdrawFundsPercents[msg.sender] = 0;
-    }
-
-    function getUserWithdrawRequestInfo(address _user) public view returns (uint256) {
-        require(_withdrawRequestUserExist(_user), "There isn't any withdraw request of you");
-        return withdrawFundsPercents[_user];
-    }
-
-    function _withdrawRequestUserExist(address _address) internal view returns (bool) {
-        for (uint256 i = 0; i < users.length; i++) {
-            if (withdrawRequestUsers[i] == _address) {
-                return true;
-            }
-        }
-        return false;
     }
 
  
@@ -396,15 +465,12 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         return stakedAssets[_user];
     }
 
-    function getTotalFunds(uint256 _assetsValue) public view returns (uint256) {
+    function getTotalFunds() public view returns (uint256) {
         uint256 ethBalance = address(nftCollection).balance;
-        uint256 wethBalance = getWethBalance();
-        uint256 fundsTotal = ethBalance + wethBalance + _assetsValue;
+        uint256 wethBalance = nftCollection.getWethBalance();
+        uint256 assetsValue = nftCollection.getTotalAssetsValue();
+        uint256 fundsTotal = ethBalance + wethBalance + assetsValue;
         return fundsTotal;
-    }
-
-    function getWethBalance() public view returns (uint256) {
-        return weth.balanceOf(address(nftCollection));
     }
 
     function userStakeInfo(address _user)
@@ -415,8 +481,8 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         return stakedAssets[_user];
     }
 
-    function getUserFunds(address _user, uint256 _assetsValue) public view returns (uint256) {
-        uint256 fundsTotal = getTotalFunds(_assetsValue);
+    function getUserFunds(address _user) public view returns (uint256) {
+        uint256 fundsTotal = getTotalFunds();
         uint256 allocationUser = stakedAssets[_user].allocation;
         uint256 fundsUser = fundsTotal * allocationUser / allocationTotal;
 
@@ -447,20 +513,36 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         return day == 1;
     }
 
+    function _isAddressInArray(address _address, address[] memory _array) internal pure returns (bool) {
+        for (uint256 i = 0; i < _array.length; i++) {
+            if (_array[i] == _address) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     modifier onlyOwner() {
         require(msg.sender == owner, "Not the owner");
         _;
     }
 
 
+
     ////////////////////////////////////////////////////////////
     //-----------------------  Event  ------------------------//
     ////////////////////////////////////////////////////////////
 
+
     event Staked(address indexed user, uint256 tokenId);
     event Unstaked(address indexed user, uint256 tokenId);
     event Deposit(address indexed user, uint256 amount);
+    event DepositReceived(address indexed user, uint256 amount);
     event RewardsDistributed(uint256 timestamp);
     event WithdrawTeamProfit(uint256 profitTeam, uint256 timestamp);
     event WithdrawUserProfit(address indexed user, uint256 profit, uint256 timestamp);
+    event WithdrawUserFunds(address indexed user, uint256 funds, uint256 timestamp);
+    event WithdrawPending(address indexed user, uint256 funds);
+    event WithdrawAllPending(address indexed user);
+    event PendingWithdrawCompleted(address indexed user, uint256 funds, uint256 timestamp);
 }
