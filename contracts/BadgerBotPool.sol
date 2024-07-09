@@ -108,6 +108,10 @@ contract BadgerBotPool is
         baseURI = _newBaseURI;
     }
 
+    function getBaseURI() external view returns (string memory) {
+        return _baseURI();
+    }
+
     function _baseURI() internal view override returns (string memory) {
         return baseURI;
     }
@@ -172,16 +176,6 @@ contract BadgerBotPool is
         payable(msg.sender).transfer(ethBalance);
     }
 
-
-    // ============ 3.  Pausable Functions  // ============
-
-    function pause() public onlyOwner {
-        _pause();
-    }
-
-    function unpause() public onlyOwner {
-        _unpause();
-    }
 
 
     // ============ 4.  Minting Functions  // ============
