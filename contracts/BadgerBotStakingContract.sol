@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
@@ -13,14 +14,15 @@ import "./DateTime.sol";
 /// @notice Staking Contract that uses the Openzepellin Staking model to distribute ERC20 token rewards in a dynamic way,
 /// proportionally based on the amount of ERC721 tokens staked by each staker at any given time.
 
-contract BadgerBotStakingContract is ReentrancyGuard {
+contract BadgerBotStakingContract is 
+    IERC721Receiver,
+    ReentrancyGuard,
+    Ownable
+{
     using Strings for uint256;
 
     BadgerBotPool public nftCollection;
-    IERC20 public weth;
-    // IERC20 public beth;
 
-    address public owner;
     address payable public teamAddress;
 
     uint256 public totalStakedSupply;
@@ -48,11 +50,6 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     address[] private withdrawThisMonthUsers;
     // uint256 public lastDistributionTimestamp;
 
-    // struct DepositRecord {
-    //     uint256 deposit_amount;
-    //     uint256 deposit_timestamp;
-    // }
-
     struct StakedAsset {
         uint256 tokenId;
         uint256 stake_timestamp;
@@ -63,7 +60,6 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         bool enableWithdrawProfit;
         uint256 deposit_amount_this_month;
         uint256 withdraw_amount_this_month;
-        // DepositRecord[] deposit_records;
     }
 
     mapping(address => StakedAsset) public stakedAssets;
@@ -77,10 +73,11 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     uint256 public pendingWithdrawAmountTotal;
     uint256 public pendingWithdrawAllAllocationTotal;
 
-    constructor(address payable _nftCollection, address _weth, address payable _team) {
-        owner = msg.sender;
+    constructor(
+        address payable _nftCollection, 
+        address payable _team
+    ) Ownable(msg.sender) {
         nftCollection = BadgerBotPool(_nftCollection);
-        weth = IERC20(_weth);
         teamAddress = _team;//Team Wallet Address
     }
 
@@ -101,6 +98,10 @@ contract BadgerBotStakingContract is ReentrancyGuard {
 
     function setTeamSharePercent(uint256 _teamShare) external onlyOwner {
         TEAM_SHARE = _teamShare;
+    }
+
+    function setTeamAddress(address payable _teamAddress) external onlyOwner {
+        teamAddress = _teamAddress;
     }
 
     function setInitialTaxPercent(uint256 _initialTax) public onlyOwner {
@@ -140,13 +141,6 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         stakedAssets[_investor].stake_timestamp = _depositTimestamp;
         stakedAssets[_investor].staked = false;
 
-        // DepositRecord memory newRecord = DepositRecord({
-        //     deposit_amount: _depositAmount,
-        //     deposit_timestamp: block.timestamp
-        // });
-
-        // stakedAssets[msg.sender].deposit_records.push(newRecord);
-
         uint256 ratio = getRatio();
 
         ( bool sent, ) = address(nftCollection).call{value: _depositAmount}("");
@@ -172,9 +166,10 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     }
 
     function stake(uint256 tokenId) external {
-        require(nftCollection.balanceOf(msg.sender) > 0, 'user has no NFT pass');
-        require(stakedAssets[msg.sender].tokenId == tokenId, 'user is not the owner of this nft');
-        require(stakedAssets[msg.sender].staked == false, 'user already has staked asset');
+        require(nftCollection.ownerOf(tokenId) == msg.sender, "Caller is not the owner of the token.");
+        require(nftCollection.getApproved(tokenId) == address(this), "Caller didn't approve staking contract to stake.");
+        require(stakedAssets[msg.sender].staked == false, 'Caller already has staked asset');
+        
         nftCollection.safeTransferFrom(msg.sender, address(this), tokenId);
         totalStakedSupply += 1;
         
@@ -186,13 +181,14 @@ contract BadgerBotStakingContract is ReentrancyGuard {
     }
 
     function unstake(uint256 tokenId) public nonReentrant {
-        require(stakedAssets[msg.sender].staked == true, 'user has no staked asset');
-        require(stakedAssets[msg.sender].tokenId == tokenId, 'user is not the owner of this asset');
+        require(stakedAssets[msg.sender].staked == true, 'Caller has no staked asset');
+        require(stakedAssets[msg.sender].tokenId == tokenId, 'Caller is not the owner of this asset');
         nftCollection.safeTransferFrom(address(this), msg.sender, tokenId);
 
         totalStakedSupply -= 1;
         stakedAssets[msg.sender].tokenId = 0;
         stakedAssets[msg.sender].stake_timestamp = 0;
+        stakedAssets[msg.sender].staked = false;
         _removeUser(msg.sender);
         emit Unstaked(msg.sender, tokenId);
     }
@@ -218,13 +214,6 @@ contract BadgerBotStakingContract is ReentrancyGuard {
 
         emit DepositReceived(msg.sender,  msg.value);
         
-        // DepositRecord memory newRecord = DepositRecord({
-        //     deposit_amount: msg.value,
-        //     deposit_timestamp: block.timestamp
-        // });
-
-        // asset.deposit_records.push(newRecord);
-
         if (asset.allocation == 0) {
             asset.deposit_timestamp = block.timestamp;
             asset.deposited = true;
@@ -368,7 +357,7 @@ contract BadgerBotStakingContract is ReentrancyGuard {
 
 
     function rewardDistribution() external onlyOwner nonReentrant {
-        require(_isFirstDayOfMonth(), "Today is not the 1st of the month");
+        // require(_isFirstDayOfMonth(), "Today is not the 1st of the month");
 
         uint256 fundsTotalCurrent = getTotalFunds();
         uint256 profitTotal = fundsTotalCurrent - fundsTotalOld - depositAmountThisMonth + withdrawAmountThisMonth;
@@ -560,11 +549,11 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         _removeAddressFromArray(_user, users);
     }
 
-    function _isFirstDayOfMonth() internal view returns (bool) {
-        uint256 currentTime = block.timestamp;
-       (, , uint256 day) = DateTime.timestampToDate(currentTime);
-        return day == 1;
-    }
+    // function _isFirstDayOfMonth() internal view returns (bool) {
+    //     uint256 currentTime = block.timestamp;
+    //    (, , uint256 day) = DateTime.timestampToDate(currentTime);
+    //     return day == 1;
+    // }
 
     function _isAddressInArray(address _address, address[] memory _array) internal pure returns (bool) {
         for (uint256 i = 0; i < _array.length; i++) {
@@ -585,11 +574,14 @@ contract BadgerBotStakingContract is ReentrancyGuard {
         }
     }
 
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Not the owner");
-        _;
+    function onERC721Received(
+        address /**operator*/,
+        address /**from*/,
+        uint256 /**amount*/,
+        bytes calldata //data
+    ) external pure override returns (bytes4) {
+        return IERC721Receiver.onERC721Received.selector;
     }
-
 
 
     ////////////////////////////////////////////////////////////
