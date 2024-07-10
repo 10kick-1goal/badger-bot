@@ -44,10 +44,10 @@ contract BadgerBotStakingContract is
     uint256 public ratioOld;
     
     uint256 public allocationTotal;
-    uint256 private depositAmountThisMonth;
-    uint256 private withdrawAmountThisMonth;
-    address[] private depositThisMonthUsers;
-    address[] private withdrawThisMonthUsers;
+    uint256 public depositAmountThisMonth;
+    uint256 public withdrawAmountThisMonth;
+    address[] public depositThisMonthUsers;
+    address[] public withdrawThisMonthUsers;
     // uint256 public lastDistributionTimestamp;
 
     struct StakedAsset {
@@ -128,18 +128,17 @@ contract BadgerBotStakingContract is
     ////////////////////////////////////////////////////////////
 
 
-    function addExistingInvestors(address _investor, uint256 _depositAmount, uint256 _depositTimestamp) external payable onlyOwner {
+    function addExistingInvestors(
+        address _investor, 
+        uint256 _depositAmount 
+    ) external payable onlyOwner {
         require(nftCollection.isWhitelisted(_investor), "Address is not in the whitelist");
         require(_depositAmount > 0, "Deposit amount must be greater than zero");
         require(_depositAmount == msg.value, "Correct ETH is not set to deposit.");
 
-        StakedAsset storage asset = stakedAssets[_investor];
-
         uint256 _tokenId = nftCollection.tokenOfOwnerByIndex(_investor, 0);
 
-        stakedAssets[_investor].tokenId = _tokenId;
-        stakedAssets[_investor].stake_timestamp = _depositTimestamp;
-        stakedAssets[_investor].staked = false;
+        _stake(_investor, _tokenId);
 
         uint256 ratio = getRatio();
 
@@ -148,36 +147,28 @@ contract BadgerBotStakingContract is
 
         emit DepositReceived(_investor, _depositAmount);
 
-        if (asset.allocation == 0) {
-            asset.deposit_timestamp = block.timestamp;
-            asset.deposited = true;
-            asset.enableWithdrawProfit = false;
-            isWithdrawProfit[_investor] = false;
-        }
+        _recordDeposit(_investor, _depositAmount, ratio);        
 
-        uint256 depositAllocation = _depositAmount / ratio;
-        asset.allocation += depositAllocation;
-        allocationTotal += depositAllocation;
-        asset.deposit_amount_this_month += _depositAmount;
-        depositThisMonthUsers.push(_investor);
-        depositAmountThisMonth += _depositAmount;
-
-        emit Deposit(_investor,  _depositAmount);
     }
 
     function stake(uint256 tokenId) external {
-        require(nftCollection.ownerOf(tokenId) == msg.sender, "Caller is not the owner of the token.");
-        require(nftCollection.getApproved(tokenId) == address(this), "Caller didn't approve staking contract to stake.");
-        require(stakedAssets[msg.sender].staked == false, 'Caller already has staked asset');
+        _stake(msg.sender, tokenId);
+    }
+
+    function _stake(address _user, uint256 _tokenId) internal {
+        require(nftCollection.ownerOf(_tokenId) == _user, "Caller is not the owner of the token.");
+        require(nftCollection.getApproved(_tokenId) == address(this), "Caller didn't approve staking contract to stake.");
+        StakedAsset storage asset = stakedAssets[_user];
+        require(asset.staked == false, 'Caller already has staked asset');
         
-        nftCollection.safeTransferFrom(msg.sender, address(this), tokenId);
+        nftCollection.safeTransferFrom(msg.sender, address(this), _tokenId);
         totalStakedSupply += 1;
         
-        stakedAssets[msg.sender].tokenId = tokenId;
-        stakedAssets[msg.sender].stake_timestamp = block.timestamp;
-        stakedAssets[msg.sender].staked = true;
-        users.push(msg.sender);
-        emit Staked(msg.sender, tokenId);
+        asset.tokenId = _tokenId;
+        asset.stake_timestamp = block.timestamp;
+        asset.staked = true;
+        users.push(_user);
+        emit Staked(_user, _tokenId);
     }
 
     function unstake(uint256 tokenId) public nonReentrant {
@@ -213,22 +204,27 @@ contract BadgerBotStakingContract is
         require(sent, "Failed to send Ether");
 
         emit DepositReceived(msg.sender,  msg.value);
-        
+
+        _recordDeposit(msg.sender, msg.value, ratio);        
+    }
+
+    function _recordDeposit(address _user, uint256 _amount, uint256 _ratio) internal {
+        StakedAsset storage asset = stakedAssets[_user];
         if (asset.allocation == 0) {
             asset.deposit_timestamp = block.timestamp;
             asset.deposited = true;
             asset.enableWithdrawProfit = false;
-            isWithdrawProfit[msg.sender] = false;
+            isWithdrawProfit[_user] = false;
         }
 
-        uint256 depositAllocation = msg.value / ratio;
+        uint256 depositAllocation = _amount / _ratio;
         asset.allocation += depositAllocation;
         allocationTotal += depositAllocation;
-        asset.deposit_amount_this_month += msg.value;
-        depositThisMonthUsers.push(msg.sender);
-        depositAmountThisMonth += msg.value;
+        asset.deposit_amount_this_month += _amount;
+        depositThisMonthUsers.push(_user);
+        depositAmountThisMonth += _amount;
 
-        emit Deposit(msg.sender,  msg.value);
+        emit Deposit(_user,  _amount);
     }
 
 
