@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
-
+import "hardhat/console.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Strings.sol";
 import "./BadgerBotPool.sol";
-import "./DateTime.sol";
+// import "./DateTime.sol";
 
 /// @author Shola Ayeni, Hiroki Hara
 /// @title BadgerBot NFT Staking Contract
@@ -235,16 +235,20 @@ contract BadgerBotStakingContract is
 
 
     function requestWithdraw(uint256 _withdrawFundsPercent) public nonReentrant {
+        console.log("Entering requestWithdraw", _withdrawFundsPercent);
         require(_withdrawFundsPercent > 0, "Withdraw percent must be greater than zero");
         require(stakedAssets[msg.sender].allocation > 0, "User has no staked asset");
 
         uint256 fundsUser = getUserFunds(msg.sender);
+        console.log("User funds", fundsUser);
         if (fundsUser < 1 || _withdrawFundsPercent > MAX_WITHDRAW_PERCENT) {
             revert(string.concat("You can only request a withdrawal of less than ", MAX_WITHDRAW_PERCENT.toString(),"%."));
         }
 
         uint256 withdrawAmount = fundsUser * _withdrawFundsPercent;
         uint256 poolEthBalance = address(nftCollection).balance;
+        console.log("Withdraw amount", withdrawAmount);
+        console.log("Pool ETH balance", poolEthBalance);
 
         if (poolEthBalance >= withdrawAmount) {
             _withdrawToUser(msg.sender, withdrawAmount);
