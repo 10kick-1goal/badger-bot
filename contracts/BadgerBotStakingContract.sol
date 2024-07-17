@@ -236,7 +236,6 @@ contract BadgerBotStakingContract is
 
 
     function requestWithdraw(uint256 _withdrawFundsPercent) public nonReentrant {
-        console.log("Entering requestWithdraw", _withdrawFundsPercent);
         require(_withdrawFundsPercent > 0, "Withdraw percent must be greater than zero");
         require(stakedAssets[msg.sender].allocation > 0, "User has no staked asset");
 
@@ -246,10 +245,8 @@ contract BadgerBotStakingContract is
             revert(string.concat("You can only request a withdrawal of less than ", MAX_WITHDRAW_PERCENT.toString(),"%."));
         }
 
-        uint256 withdrawAmount = fundsUser * _withdrawFundsPercent;
+        uint256 withdrawAmount = fundsUser * _withdrawFundsPercent /100;
         uint256 poolEthBalance = address(nftCollection).balance;
-        console.log("Withdraw amount", withdrawAmount);
-        console.log("Pool ETH balance", poolEthBalance);
 
         if (poolEthBalance >= withdrawAmount) {
             _withdrawToUser(msg.sender, withdrawAmount);
@@ -336,7 +333,7 @@ contract BadgerBotStakingContract is
         StakedAsset storage asset = stakedAssets[_user];
         uint256 depositTime = asset.deposit_timestamp;
         uint256 taxPercent = _calcWithdrawTaxPercent(depositTime, block.timestamp);
-        uint256 teamShare = _amount * taxPercent;
+        uint256 teamShare = _amount * taxPercent / 100;
 
         nftCollection.withdrawByStakingContract(teamAddress, teamShare);
         nftCollection.withdrawByStakingContract(_user, _amount - teamShare);
@@ -429,7 +426,7 @@ contract BadgerBotStakingContract is
 
         delete withdrawProfitRequestUsers;
 
-    //------------ Reset Old State and Temps States ----------------//
+        //------------ Reset Old State and Temps States ----------------//
         fundsTotalOld = fundsTotalCurrent;
         allocationTotalOld = allocationTotal;
         ratioOld = fundsTotalOld * DECIMAL_FACTOR / allocationTotalOld;
@@ -469,7 +466,9 @@ contract BadgerBotStakingContract is
 
 
     function requestWithdrawProfit() external {
-        require(stakedAssets[msg.sender].enableWithdrawProfit, "You can request withdraw profit since next month.");
+        StakedAsset storage asset = stakedAssets[msg.sender];
+        require(asset.staked, 'User has no staked asset.');
+        require(asset.enableWithdrawProfit, "You can request withdraw profit since next month.");
         require(isWithdrawProfit[msg.sender] == false, "You've already request withdraw profit.");
         withdrawProfitRequestUsers.push(msg.sender);
         isWithdrawProfit[msg.sender] = true;
@@ -527,7 +526,7 @@ contract BadgerBotStakingContract is
 
     function getRatio() public view returns (uint256) {
         if (allocationTotal == 0) {
-            return 1;
+            return 1 * DECIMAL_FACTOR;
         } else {
             uint256 fundsTotal = getTotalFunds();
             uint256 ratio = fundsTotal * DECIMAL_FACTOR / allocationTotal;
