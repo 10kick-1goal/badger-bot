@@ -37,7 +37,7 @@ contract BadgerBotStakingContract is
     uint256 public INITIAL_TAX = 15;
     uint256 public SLOP_TAX = 1;
     uint256 public STAGNANT_TAX = 3;
-
+    uint256 month = 2629743;
 
     uint256 public fundsTotalOld;
     uint256 public allocationTotalOld;
@@ -333,7 +333,12 @@ contract BadgerBotStakingContract is
 
         uint256 ratio = getRatio();
         StakedAsset storage asset = stakedAssets[_user];
-        nftCollection.withdrawByStakingContract(_user, _amount);
+        uint256 depositTime = asset.deposit_timestamp;
+        uint256 taxPercent = _calcWithdrawTaxPercent(depositTime, block.timestamp);
+        uint256 teamShare = _amount * taxPercent;
+
+        nftCollection.withdrawByStakingContract(teamAddress, teamShare);
+        nftCollection.withdrawByStakingContract(_user, _amount - teamShare);
         emit WithdrawUserFunds(_user, _amount, block.timestamp);
 
         uint256 withdrawAllocation = _amount / ratio;
@@ -348,6 +353,24 @@ contract BadgerBotStakingContract is
             asset.enableWithdrawProfit = false;
             _cancelWithdrawProfitRequest(_user);
         }
+    }
+
+    function calcWithdrawTaxPercent() external view returns(uint256) {
+        require(stakedAssets[msg.sender].deposited == true, "Caller doesn't have any deposited funds");
+
+        uint256 taxPercent = _calcWithdrawTaxPercent(stakedAssets[msg.sender].deposit_timestamp, block.timestamp);
+        return taxPercent;
+    }
+
+    function _calcWithdrawTaxPercent(uint256 depositTime, uint256 withdrawTime) internal view returns (uint256) {
+        uint256 time = withdrawTime - depositTime;
+        uint256 months = (time - time % month) / month;
+        int256 taxPercent = int256(INITIAL_TAX) - int256(SLOP_TAX * months);
+        if (taxPercent < int256(STAGNANT_TAX)) {
+            taxPercent = int256(STAGNANT_TAX);
+        }
+
+        return uint256(taxPercent);
     }
 
 
