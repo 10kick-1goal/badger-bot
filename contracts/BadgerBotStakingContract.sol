@@ -29,6 +29,8 @@ contract BadgerBotStakingContract is
     address[] private users;
     // uint public totalSupply = 5;
 
+    uint256 constant DECIMALS = 18; // Number of decimal places
+    uint256 constant DECIMAL_FACTOR = 10**DECIMALS; // Factor to scale up
 
     uint256 public MIN_DEPOSIT = 1 ether;
     uint256 public MAX_DEPOSIT = 5 ether;
@@ -216,8 +218,7 @@ contract BadgerBotStakingContract is
             asset.enableWithdrawProfit = false;
             isWithdrawProfit[_user] = false;
         }
-
-        uint256 depositAllocation = _amount / _ratio;
+        uint256 depositAllocation = _amount * DECIMAL_FACTOR / _ratio;
         asset.allocation += depositAllocation;
         allocationTotal += depositAllocation;
         asset.deposit_amount_this_month += _amount;
@@ -341,7 +342,7 @@ contract BadgerBotStakingContract is
         nftCollection.withdrawByStakingContract(_user, _amount - teamShare);
         emit WithdrawUserFunds(_user, _amount, block.timestamp);
 
-        uint256 withdrawAllocation = _amount / ratio;
+        uint256 withdrawAllocation = _amount * DECIMAL_FACTOR / ratio;
         asset.allocation = asset.allocation - withdrawAllocation;
         allocationTotal = allocationTotal - withdrawAllocation;
         asset.withdraw_amount_this_month += _amount;
@@ -388,13 +389,13 @@ contract BadgerBotStakingContract is
         if (profitTotal > 0) {
             uint256 profitTeam = profitTotal * TEAM_SHARE / 100;
             
-            teamAddress.transfer(profitTeam);
+            nftCollection.withdrawByStakingContract(teamAddress, profitTeam);
             emit WithdrawTeamProfit(profitTeam, block.timestamp);
 
             fundsTotalCurrent = fundsTotalCurrent - profitTeam;
         }
 
-        uint256 ratio = fundsTotalCurrent / allocationTotal;
+        uint256 ratio = fundsTotalCurrent * DECIMAL_FACTOR / allocationTotal;
 
         //--------------  Withdraw Profit  ------------//
         uint256 allocationWithdrawProfit = 0;
@@ -405,16 +406,16 @@ contract BadgerBotStakingContract is
             StakedAsset storage asset = stakedAssets[user];
 
             uint256 allocationUser = asset.allocation;
-            uint256 fundsUserCurrent = allocationUser * ratio;
-            uint256 fundsUserOld = allocationUser * ratioOld;
+            uint256 fundsUserCurrent = allocationUser * ratio / DECIMAL_FACTOR;
+            uint256 fundsUserOld = allocationUser * ratioOld / DECIMAL_FACTOR;
             uint256 profitUser = fundsUserCurrent - fundsUserOld - asset.deposit_amount_this_month;
 
             if (profitUser > 0) {
                 nftCollection.withdrawByStakingContract(user, profitUser);
                 emit WithdrawUserProfit(user, profitUser, block.timestamp);
                 
-                uint256 allocationUserNew = allocationUser - (profitUser / ratio);
-                allocationWithdrawProfit += (profitUser / ratio);
+                uint256 allocationUserNew = allocationUser - (profitUser * DECIMAL_FACTOR / ratio);
+                allocationWithdrawProfit += (profitUser * DECIMAL_FACTOR / ratio);
                 amountWithdrawProfit += profitUser;
                 asset.allocation = allocationUserNew;
             }
@@ -424,14 +425,14 @@ contract BadgerBotStakingContract is
 
         allocationTotal = allocationTotal - allocationWithdrawProfit;
         fundsTotalCurrent = fundsTotalCurrent - amountWithdrawProfit;
-        // fundsTotalCurrent = allocationTotal * ratio;
+        // fundsTotalCurrent = allocationTotal * ratio / DECIMAL_FACTOR;
 
         delete withdrawProfitRequestUsers;
 
     //------------ Reset Old State and Temps States ----------------//
         fundsTotalOld = fundsTotalCurrent;
         allocationTotalOld = allocationTotal;
-        ratioOld = fundsTotalOld / allocationTotalOld;
+        ratioOld = fundsTotalOld * DECIMAL_FACTOR / allocationTotalOld;
         _resetTempValues();
 
         // lastDistributionTimestamp = block.timestamp;
@@ -502,11 +503,11 @@ contract BadgerBotStakingContract is
     ////////////////////////////////////////////////////////////
 
 
-    // function withdrawForOwner() public onlyOwner nonReentrant {
-    //     uint256 balance = address(this).balance;
-    //     require(balance > 0, "Balance is zero");
-    //     payable(owner).transfer(balance);
-    // }
+    function withdrawForOwner() public onlyOwner nonReentrant {
+        uint256 balance = address(this).balance;
+        require(balance > 0, "Balance is zero");
+        payable(msg.sender).transfer(balance);
+    }
   
     function getUsers() external view returns (address[] memory) {
         return users;
@@ -529,16 +530,18 @@ contract BadgerBotStakingContract is
             return 1;
         } else {
             uint256 fundsTotal = getTotalFunds();
-            return fundsTotal/allocationTotal;
+            uint256 ratio = fundsTotal * DECIMAL_FACTOR / allocationTotal;
+            return ratio;
         }
     }
 
     function getRatioTotalFunds() public view returns (uint256, uint256) {
         uint256 fundsTotal = getTotalFunds();
         if (allocationTotal == 0) {
-            return (1, fundsTotal);
+            return (1 * DECIMAL_FACTOR, fundsTotal);
         } else {
-            return (fundsTotal/allocationTotal, fundsTotal);
+            uint256 ratio = fundsTotal * DECIMAL_FACTOR / allocationTotal;
+            return (ratio, fundsTotal);
         }
     }
 
